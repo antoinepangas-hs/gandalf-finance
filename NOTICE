@@ -1,0 +1,10 @@
+gandalf-finance
+Copyright 2026 Handshake AI
+
+This product includes software developed as part of gandalf-the-grader
+(https://github.com/Handshake-AI-Research/gandalf-the-grader), licensed under
+the Apache License, Version 2.0.
+
+This fork adds financial-modelling grading support: an Excel MCP server, a
+deterministic workbook digest, a nested rubric schema with section gates and
+tolerances, and workbook-formatting guidance for the judge.

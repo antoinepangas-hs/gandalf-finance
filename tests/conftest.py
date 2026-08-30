@@ -25,11 +25,19 @@ def make_config(**overrides: Any) -> GraderConfig:
     return GraderConfig(**defaults)
 
 
-def cr(*, weight: float, met: bool | None) -> CriterionResult:
+def cr(
+    *,
+    weight: float,
+    met: bool | None,
+    section: str | None = None,
+    gate: bool = False,
+) -> CriterionResult:
     """Helper to build a CriterionResult for scoring tests."""
     return CriterionResult(
         criterion="test",
         weight=weight,
+        section=section,
+        gate=gate,
         met=met,
         reasoning="test",
     )

@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import secrets
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 from pydantic import TypeAdapter
 
-from gandalf.models import BatchJudgeInput, JudgeInput, LLMUsage, MCPServer, Verdict
+from gandalf.models import BatchJudgeInput, ExcelBackendConfig, JudgeInput, LLMUsage, MCPServer, ReasoningEffort, Verdict
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -191,6 +192,8 @@ def mcp_server_to_config(srv: MCPServer) -> dict[str, Any]:
         entry: dict[str, Any] = {"command": srv.command}
         if srv.args:
             entry["args"] = srv.args
+        if srv.env:
+            entry["env"] = srv.env
         return entry
     entry = {"url": srv.url, "transport": srv.transport}
     if srv.headers:
@@ -198,9 +201,87 @@ def mcp_server_to_config(srv: MCPServer) -> dict[str, Any]:
     return entry
 
 
+def excel_backend_env(
+    workdir: str,
+    excel_backend: ExcelBackendConfig,
+    *,
+    metrics_path: str | None = None,
+    debug_metrics: str | None = None,
+) -> dict[str, str]:
+    """Return environment variables consumed by the bundled Excel MCP server."""
+    env = {
+        "GANDALF_EXCEL_WORKDIR": workdir,
+        "GANDALF_EXCEL_BACKEND": excel_backend.backend,
+        "GANDALF_EXCEL_TIMEOUT_SECONDS": str(excel_backend.timeout_seconds),
+        "GANDALF_EXCEL_VISIBLE": str(excel_backend.visible).lower(),
+        "GANDALF_EXCEL_ALLOW_MACROS": str(excel_backend.allow_macros).lower(),
+        "GANDALF_EXCEL_MAX_CELLS_PER_CALL": str(excel_backend.max_cells_per_call),
+        "GANDALF_EXCEL_MAX_FORMAT_CELLS_PER_CALL": str(excel_backend.max_format_cells_per_call),
+    }
+    if excel_backend.windows_url is not None:
+        env["GANDALF_EXCEL_WINDOWS_URL"] = excel_backend.windows_url
+    if excel_backend.auth_token is not None:
+        env["GANDALF_EXCEL_AUTH_TOKEN"] = excel_backend.auth_token
+    cache_dir = os.environ.get("GANDALF_EXCEL_CACHE_DIR")
+    if excel_backend.backend == "libreoffice" and cache_dir:
+        env["GANDALF_EXCEL_CACHE_DIR"] = cache_dir
+    metrics_path = metrics_path or os.environ.get("GANDALF_EXCEL_METRICS_PATH")
+    if metrics_path:
+        env["GANDALF_EXCEL_METRICS_PATH"] = metrics_path
+    debug_metrics = debug_metrics or os.environ.get("GANDALF_EXCEL_DEBUG_METRICS")
+    if debug_metrics:
+        env["GANDALF_EXCEL_DEBUG_METRICS"] = debug_metrics
+    return env
+
+
+def excel_mcp_server(workdir: str | None = None, excel_backend: ExcelBackendConfig | None = None) -> MCPServer:
+    """Return the bundled Excel MCP stdio server config."""
+    env = excel_backend_env(workdir, excel_backend) if workdir is not None and excel_backend is not None else {}
+    return MCPServer(
+        name="excel",
+        command=sys.executable,
+        args=["-m", "gandalf.excel_mcp"],
+        env=env,
+    )
+
+
+def effective_mcp_servers(
+    mcp_servers: list[MCPServer],
+    excel_backend: ExcelBackendConfig,
+    *,
+    workdir: str | None = None,
+) -> list[MCPServer]:
+    """Return configured MCP servers plus the bundled Excel server when enabled."""
+    if not excel_backend.enabled:
+        return mcp_servers
+    if any(srv.name == "excel" for srv in mcp_servers):
+        msg = (
+            "excel_backend.enabled automatically attaches an MCP server named 'excel'; "
+            "remove or rename the configured MCP server named 'excel'"
+        )
+        raise RuntimeError(msg)
+    return [*mcp_servers, excel_mcp_server(workdir, excel_backend)]
+
+
+def configure_excel_backend_env(workdir: str, excel_backend: ExcelBackendConfig) -> None:
+    """Expose Excel backend settings to the bundled MCP server subprocess."""
+    if not excel_backend.enabled:
+        return
+    env = excel_backend_env(workdir, excel_backend)
+    os.environ.update(env)
+    if excel_backend.windows_url is None:
+        os.environ.pop("GANDALF_EXCEL_WINDOWS_URL", None)
+    if excel_backend.auth_token is None:
+        os.environ.pop("GANDALF_EXCEL_AUTH_TOKEN", None)
+    if excel_backend.backend != "libreoffice" or "GANDALF_EXCEL_CACHE_DIR" not in env:
+        os.environ.pop("GANDALF_EXCEL_CACHE_DIR", None)
+
+
 def run_agent_session(
     model: str,
+    reasoning_effort: ReasoningEffort | None,
     mcp_servers: list[MCPServer],
+    excel_backend: ExcelBackendConfig,
     workdir: str,
     prompt: str,
 ) -> LLMUsage:
@@ -215,6 +296,8 @@ def run_agent_session(
     # (e.g. /home/agent when the judge runs as judge-sandbox via sudo),
     # causing PermissionError on mkdir.
     os.environ["HOME"] = workdir
+    configure_excel_backend_env(workdir, excel_backend)
+    mcp_servers = effective_mcp_servers(mcp_servers, excel_backend, workdir=workdir)
 
     api_key = os.environ.get("LLM_API_KEY")
     if not api_key:
@@ -225,11 +308,14 @@ def run_agent_session(
         )
         raise RuntimeError(msg)
 
-    llm = LLM(
-        model=model,
-        api_key=api_key,
-        base_url=os.environ.get("LLM_BASE_URL"),
-    )
+    llm_kwargs: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key,
+        "base_url": os.environ.get("LLM_BASE_URL"),
+    }
+    if reasoning_effort is not None:
+        llm_kwargs["reasoning_effort"] = reasoning_effort
+    llm = LLM(**llm_kwargs)
 
     tools = [
         Tool(name=TerminalTool.name),
@@ -276,7 +362,14 @@ def run_judge(input_path: str, output_path: str) -> None:
 
     llm_usage = LLMUsage()
     try:
-        llm_usage = run_agent_session(judge_input.model, judge_input.mcp_servers, judge_input.workdir, prompt)
+        llm_usage = run_agent_session(
+            judge_input.model,
+            judge_input.reasoning_effort,
+            judge_input.mcp_servers,
+            judge_input.excel_backend,
+            judge_input.workdir,
+            prompt,
+        )
         verdict = read_verdict(verdict_path)
     except Exception as e:  # noqa: BLE001
         verdict = Verdict(met=None, reasoning=f"Judge execution error: {e}")
@@ -317,7 +410,14 @@ def run_judge_batch(input_path: str, output_path: str) -> None:
 
     llm_usage = LLMUsage()
     try:
-        llm_usage = run_agent_session(judge_input.model, judge_input.mcp_servers, judge_input.workdir, prompt)
+        llm_usage = run_agent_session(
+            judge_input.model,
+            judge_input.reasoning_effort,
+            judge_input.mcp_servers,
+            judge_input.excel_backend,
+            judge_input.workdir,
+            prompt,
+        )
         verdicts = read_batch_verdict(verdict_path, n_criteria)
     except Exception as e:  # noqa: BLE001
         verdicts = Verdict.errors(

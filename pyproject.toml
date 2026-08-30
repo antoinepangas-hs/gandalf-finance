@@ -1,5 +1,5 @@
 [project]
-name = "gandalf-the-grader"
+name = "gandalf-finance"
 dynamic = ["version", "optional-dependencies"]
 description = "Agent-as-judge grading framework for evaluating AI agent outputs against rubric criteria"
 readme = "README.md"
@@ -17,21 +17,26 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "fastmcp>=3.2,<4",
     "jinja2>=3.1,<4",
     "litellm>=1.82.0,<2",
+    "openpyxl>=3.1.5",
     "openhands-sdk>=1.11.2,<1.16.1",
     "openhands-tools>=1.11.2,<1.16.1",
     "pydantic>=2.12.5,<3",
+    "xlwings>=0.33,<1",
 ]
 
 [project.urls]
-homepage = "https://github.com/Handshake-AI-Research/gandalf-the-grader"
-repository = "https://github.com/Handshake-AI-Research/gandalf-the-grader"
-issues = "https://github.com/Handshake-AI-Research/gandalf-the-grader/issues"
+homepage = "https://github.com/antoinepangas-hs/gandalf-finance"
+repository = "https://github.com/antoinepangas-hs/gandalf-finance"
+issues = "https://github.com/antoinepangas-hs/gandalf-finance/issues"
 
 [project.scripts]
 gandalf-the-grader = "gandalf.orchestrator:main"
 gandalf-the-grader-judge = "gandalf.judge:main"
+gandalf-excel-mcp = "gandalf.excel_mcp:main"
+gandalf-excel-worker = "gandalf.excel_worker:main"
 
 [build-system]
 requires = ["hatchling", "hatch-pinned-extra>=0.2.0,<0.3.0"]
@@ -39,6 +44,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 path = "src/gandalf/__about__.py"
+
+[tool.hatch.build.targets.sdist]
+# The verifier image installs this sdist. Tests, the lockfile and any ops
+# tooling are development-only and must not ride into a shipped grader.
+include = ["src/gandalf", "pyproject.toml", "README.md", "LICENSE.txt"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gandalf"]
@@ -50,7 +60,9 @@ installer = "uv"
 name = "pinned"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.15.0", "mypy>=1.19.0"]
+# python-docx is only used by helper scripts under scripts/ (and their tests),
+# not by the shipped gandalf package.
+dev = ["pytest>=8.0", "ruff>=0.15.0", "mypy>=1.19.0", "python-docx>=1.2.0"]
 
 [[tool.hatch.envs.hatch-test.matrix]]
 python = ["3.12", "3.13", "3.14"]
@@ -88,5 +100,9 @@ module = ["openhands.sdk", "openhands.tools.*", "litellm"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-markers = ["llm: end-to-end tests that call a real LLM (require LLM_API_KEY)"]
+markers = [
+    "excel: opt-in tests that automate Microsoft Excel",
+    "llm: end-to-end tests that call a real LLM (require LLM_API_KEY)",
+]
 addopts = "-m 'not llm'"
+

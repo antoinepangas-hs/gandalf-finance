@@ -12,6 +12,10 @@ import pytest
 from gandalf.judge import (
     build_batch_judge_prompt,
     build_judge_prompt,
+    configure_excel_backend_env,
+    effective_mcp_servers,
+    excel_backend_env,
+    excel_mcp_server,
     make_verdict_path,
     mcp_server_to_config,
     read_batch_verdict,
@@ -19,7 +23,7 @@ from gandalf.judge import (
     run_judge,
     run_judge_batch,
 )
-from gandalf.models import LLMUsage, MCPServer
+from gandalf.models import ExcelBackendConfig, LLMUsage, MCPServer
 from tests.conftest import MOCK_USAGE
 
 
@@ -91,6 +95,22 @@ class TestBuildJudgePrompt:
         )
         assert prompt_empty == prompt_default
 
+    def test_includes_workbook_formatting_guidance(self) -> None:
+        prompt = build_judge_prompt(
+            instructions="x",
+            final_output="z",
+            criterion="c",
+            verdict_path="/tmp/v.json",
+        )
+        assert "<workbook_formatting_guidance>" in prompt
+        assert "pure direct links only" in prompt
+        assert "=A1*Input!B1-C1" in prompt
+        assert "forecast-period column header criteria" in prompt
+        assert "FY Dec-24B" in prompt
+        assert "FY Dec-25P" in prompt
+        assert "projection/forecast suffix variants" in prompt
+        assert "exact displayed header string" in prompt
+
     def test_guidance_appears_before_task_instructions(self) -> None:
         guidance = "GUIDANCE_MARKER"
         prompt = build_judge_prompt(
@@ -132,6 +152,13 @@ class TestMCPServerToConfig:
             "args": ["--verbose", "--port", "8000"],
         }
 
+    def test_stdio_with_env(self) -> None:
+        srv = MCPServer(name="x", command="/bin/x", env={"KEY": "value"})
+        assert mcp_server_to_config(srv) == {
+            "command": "/bin/x",
+            "env": {"KEY": "value"},
+        }
+
     def test_stdio_omits_empty_args(self) -> None:
         srv = MCPServer(name="x", command="/bin/x", args=[])
         assert "args" not in mcp_server_to_config(srv)
@@ -159,6 +186,92 @@ class TestMCPServerToConfig:
     def test_remote_omits_empty_headers(self) -> None:
         srv = MCPServer(name="x", transport="sse", url="http://localhost:8000/sse")
         assert "headers" not in mcp_server_to_config(srv)
+
+    def test_excel_mcp_server_uses_current_python_module(self) -> None:
+        srv = excel_mcp_server()
+        assert srv.name == "excel"
+        assert srv.command
+        assert srv.args == ["-m", "gandalf.excel_mcp"]
+
+    def test_excel_mcp_server_includes_backend_env(self) -> None:
+        srv = excel_mcp_server("/tmp/judge_workspace", ExcelBackendConfig(enabled=True))
+
+        assert srv.env["GANDALF_EXCEL_WORKDIR"] == "/tmp/judge_workspace"
+        assert srv.env["GANDALF_EXCEL_BACKEND"] == "mac_excel"
+
+    def test_excel_mcp_server_includes_metrics_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GANDALF_EXCEL_METRICS_PATH", "/tmp/excel_metrics.json")
+        monkeypatch.setenv("GANDALF_EXCEL_DEBUG_METRICS", "1")
+
+        srv = excel_mcp_server("/tmp/judge_workspace", ExcelBackendConfig(enabled=True))
+
+        assert srv.env["GANDALF_EXCEL_METRICS_PATH"] == "/tmp/excel_metrics.json"
+        assert srv.env["GANDALF_EXCEL_DEBUG_METRICS"] == "1"
+
+    def test_excel_mcp_server_includes_libreoffice_cache_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("GANDALF_EXCEL_CACHE_DIR", "/tmp/lo-cache")
+
+        srv = excel_mcp_server(
+            "/tmp/judge_workspace",
+            ExcelBackendConfig(enabled=True, backend="libreoffice"),
+        )
+
+        assert srv.env["GANDALF_EXCEL_CACHE_DIR"] == "/tmp/lo-cache"
+
+    def test_excel_mcp_server_omits_libreoffice_cache_env_for_other_backends(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("GANDALF_EXCEL_CACHE_DIR", "/tmp/lo-cache")
+
+        srv = excel_mcp_server("/tmp/judge_workspace", ExcelBackendConfig(enabled=True, backend="mac_excel"))
+
+        assert "GANDALF_EXCEL_CACHE_DIR" not in srv.env
+
+    def test_effective_mcp_servers_appends_excel_when_enabled(self) -> None:
+        servers = effective_mcp_servers([], ExcelBackendConfig(enabled=True), workdir="/tmp/judge_workspace")
+        assert [srv.name for srv in servers] == ["excel"]
+        assert servers[0].env["GANDALF_EXCEL_WORKDIR"] == "/tmp/judge_workspace"
+
+    def test_effective_mcp_servers_rejects_excel_name_conflict(self) -> None:
+        with pytest.raises(RuntimeError, match="MCP server named 'excel'"):
+            effective_mcp_servers(
+                [MCPServer(name="excel", command="/bin/custom")],
+                ExcelBackendConfig(enabled=True),
+            )
+
+    def test_configure_excel_backend_env_sets_clone_workspace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GANDALF_EXCEL_WORKDIR", raising=False)
+        configure_excel_backend_env(
+            "/tmp/judge_workspace",
+            ExcelBackendConfig(
+                enabled=True,
+                backend="windows_vm",
+                windows_url="http://excel-vm.local",
+                timeout_seconds=30,
+                visible=True,
+                allow_macros=True,
+                max_cells_per_call=123,
+                max_format_cells_per_call=45,
+                auth_token="secret",
+            ),
+        )
+        assert os.environ["GANDALF_EXCEL_WORKDIR"] == "/tmp/judge_workspace"
+        assert os.environ["GANDALF_EXCEL_BACKEND"] == "windows_vm"
+        assert os.environ["GANDALF_EXCEL_WINDOWS_URL"] == "http://excel-vm.local"
+        assert os.environ["GANDALF_EXCEL_TIMEOUT_SECONDS"] == "30"
+        assert os.environ["GANDALF_EXCEL_VISIBLE"] == "true"
+        assert os.environ["GANDALF_EXCEL_ALLOW_MACROS"] == "true"
+        assert os.environ["GANDALF_EXCEL_MAX_CELLS_PER_CALL"] == "123"
+        assert os.environ["GANDALF_EXCEL_MAX_FORMAT_CELLS_PER_CALL"] == "45"
+        assert os.environ["GANDALF_EXCEL_AUTH_TOKEN"] == "secret"
+
+    def test_excel_backend_env_omits_absent_optional_values(self) -> None:
+        env = excel_backend_env("/tmp/judge_workspace", ExcelBackendConfig(enabled=True))
+
+        assert env["GANDALF_EXCEL_WORKDIR"] == "/tmp/judge_workspace"
+        assert "GANDALF_EXCEL_WINDOWS_URL" not in env
+        assert "GANDALF_EXCEL_AUTH_TOKEN" not in env
 
 
 class TestMakeVerdictPath:
@@ -411,6 +524,31 @@ class TestRunJudge:
         assert result["llm_usage"]["cost_usd"] == 0.05
 
     @patch("gandalf.judge.run_agent_session", return_value=MOCK_USAGE)
+    def test_passes_reasoning_effort_to_session(self, mock_session: Any, tmp_path: pathlib.Path) -> None:
+        data = {
+            "model": "openai/gpt-5.5",
+            "reasoning_effort": "xhigh",
+            "instructions": "do a thing",
+            "final_output": "done",
+            "criterion": "check something",
+            "workdir": str(tmp_path),
+        }
+        input_path = tmp_path / "input.json"
+        input_path.write_text(json.dumps(data))
+        output_path = str(tmp_path / "output.json")
+
+        verdict_data = {"met": True, "reasoning": "ok", "evidence": []}
+        with patch(
+            "gandalf.judge.make_verdict_path",
+            return_value=str(tmp_path / "verdict.json"),
+        ):
+            (tmp_path / "verdict.json").write_text(json.dumps(verdict_data))
+            run_judge(str(input_path), output_path)
+
+        assert mock_session.call_args.args[0] == "openai/gpt-5.5"
+        assert mock_session.call_args.args[1] == "xhigh"
+
+    @patch("gandalf.judge.run_agent_session", return_value=MOCK_USAGE)
     def test_preserves_usage_when_verdict_missing(self, mock_session: Any, tmp_path: pathlib.Path) -> None:  # noqa: ARG002
         """If run_agent_session succeeds but verdict file is missing, cost is kept."""
         input_path = make_judge_input_json(tmp_path)
@@ -612,6 +750,22 @@ class TestBuildJudgePromptXMLTags:
         assert "<judge_instructions>" in prompt
         assert "0 through 1" in prompt
         assert "## " not in prompt
+
+    def test_batch_includes_workbook_formatting_guidance(self) -> None:
+        prompt = build_batch_judge_prompt(
+            instructions="x",
+            final_output="y",
+            criteria=["c0"],
+            verdict_path="/tmp/v.json",
+        )
+        assert "<workbook_formatting_guidance>" in prompt
+        assert "pure direct links only" in prompt
+        assert "forecast-period column header criteria" in prompt
+        assert "FY Dec-24B" in prompt
+        assert "FY Dec-25P" in prompt
+        assert "projection/forecast suffix variants" in prompt
+        assert "exact displayed header string" in prompt
+        assert "=A1*Input!B1-C1" in prompt
 
     def test_single_guidance_uses_xml_tag(self) -> None:
         prompt = build_judge_prompt(

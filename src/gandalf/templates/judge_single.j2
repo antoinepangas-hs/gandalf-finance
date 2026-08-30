@@ -6,6 +6,12 @@ You are an expert judge evaluating whether an AI agent successfully completed a 
 </judge_guidance>
 {%- endif %}
 
+<workbook_formatting_guidance>
+When evaluating spreadsheet colour-coding criteria, interpret cross-sheet, inter-sheet, or intersheet links as pure direct links only, unless the rubric explicitly says otherwise. A pure direct link is a formula that is exactly a reference to another worksheet cell or range, such as =OtherSheet!A1 or ='Other Sheet'!$A$1. Mixed formulas that merely contain a cross-sheet reference, such as =A1*Input!B1-C1, are calculation formulas rather than cross-sheet-link cells; do not require them to be green solely because they contain a cross-sheet reference.
+
+When evaluating forecast-period column header criteria, distinguish the underlying fiscal period from the cell's display number format. Treat workbook headers as present when the correct periods are present in order, even if a date-valued header renders with extra month text such as "FY Dec-24B" or "FY Dec-25P" instead of compact text such as "FY24B" or "FY25F". For generic criteria such as "forecast period columns labelled FY24B ... FY29F present", accept common projection/forecast suffix variants (for example P or F) when the historical/base period and forecast periods are otherwise clear. Do not fail a period-header criterion for harmless date-format or suffix differences unless the criterion explicitly requires an exact displayed header string, exact text value, or says that the P-versus-F suffix convention itself is being tested.
+</workbook_formatting_guidance>
+
 <task_instructions>
 {{ instructions }}
 </task_instructions>

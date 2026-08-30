@@ -1,4 +1,4 @@
-model = "gemini/gemini-2.5-flash"
+model = "anthropic/claude-opus-4-7"
 sandbox_user = "sandbox"
 instructions = "Build a web app that displays hello world."
 rubric_path = "/tests/rubric.json"
